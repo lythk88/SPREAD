@@ -1,0 +1,16 @@
+Run: bestof8_aime24_temp0.6
+Model: Qwen/Qwen2.5-Math-1.5B-Instruct
+Number of candidate: 8
+Temperature: 0.6
+Input range: 0-1000
+Problems: 30
+Total wallclock time: 1509.63 seconds
+Average time per problem: 50.32 seconds
+Total prompt tokens: 0
+Total generated tokens: 0
+Total candidates: 240
+Average tokens per problem: 0.00
+Average tokens per candidate: 0.00
+Raw results saved to: results/Qwen2.5-Math-1.5B-Instruct$/aime24/baseline/bestof8_aime24_temp0.6_raw.pkl
+To evaluate: python evaluate_strategies.py --input results/Qwen2.5-Math-1.5B-Instruct$/aime24/baseline/bestof8_aime24_temp0.6_raw.pkl --plot
+

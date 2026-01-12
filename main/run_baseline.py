@@ -1,11 +1,3 @@
-"""
-Generation script for Steering-algorithm1 experiments.
-
-This script implements the steering algorithm 1 approach:
-1. Generate N candidate answers using temperature sampling
-2. Get activation of layer k and calculate the average
-3. Re-generate N candidate answers with new activation
-"""
 import os
 import sys
 import argparse
@@ -18,9 +10,6 @@ import re
 import random
 from tqdm import tqdm
 from pathlib import Path
-import transformers 
-import torch.nn.functional as F
-from torch import nn
 
 # Add parent directory to path to import properly
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -35,12 +24,12 @@ logger = logging.getLogger(__name__)
 
 def parse_args():
     """
-    Parse command-line arguments for Steering-algorithm1 experiments.
+    Parse command-line arguments for Baseline experiments.
 
     Returns:
         argparse.Namespace: Parsed arguments
     """
-    parser = argparse.ArgumentParser(description="Steering algorithm1 generation.")
+    parser = argparse.ArgumentParser(description="Baseline generation.")
     parser.add_argument(
         "--batch_size",
         type=int,
@@ -64,16 +53,6 @@ def parse_args():
         type=float,
         default=0.7,
         help="Temperature for generation (default: 0.7)"
-    )
-    parser.add_argument(
-        "--recalc_steer_after_n_tokens",
-        type=int,
-        default=500,
-    )
-    parser.add_argument(
-        "--calpha_k",
-        type=float,
-        default=0.1,
     )
     parser.add_argument(
         "--model_repo",
@@ -105,22 +84,10 @@ def parse_args():
         help="Custom name for the run (default: auto-generated from parameters)"
     )
     parser.add_argument(
-        "--run_name_after",
-        type=str,
-        default=None,
-        help="Custom name for the run (default: auto-generated from parameters)"
-    )
-    parser.add_argument(
         "--number_candidate",
         type=int,
         default=5,
         help="Number of candidates to generate per problem (default: 5)"
-    )
-    parser.add_argument(
-        "--steer_at_layer",
-        type=int,
-        default=5,
-        help="Position of layer for steering"
     )
     parser.add_argument(
         "--save_all_candidates",
@@ -184,141 +151,8 @@ def extract_candidate_answer(response, dataset="math"):
     except Exception as e:
         logger.warning(f"Error extracting answer: {e}")
         # Last resort fallback
-        return response.strip()        
-
-def riemannian_block_update_old(h_last, T=10, alpha_k=1.0, eta_k=1.0, calpha_k=0.001):
-    N, D = h_last.shape
-    V = []
+        return response.strip()
     
-    if isinstance(alpha_k, (int, float)):
-        alpha_k = [alpha_k] * N 
-    if isinstance(eta_k, (int, float)):
-        eta_k = [eta_k] * N
-    
-    alpha_k = [calpha_k * np.linalg.norm(h_last[k])**2 for k in range(len(h_last))]
-    # print("alpha_k:", alpha_k)
-    H_norm_fro = np.linalg.norm(h_last, ord='fro')
-    
-    for k in range(N):
-        h_k = h_last[k]
-        norm_h_k = np.linalg.norm(h_k)
-        v_k0 = np.zeros_like(h_k) if norm_h_k == 0 else h_k / norm_h_k * np.sqrt(alpha_k[k])
-        V.append(v_k0)
-    V = np.stack(V)
-
-    losses = []
-    for _ in range(T):
-        HV = h_last + V  # shape: (N, D)
-        HV_T = HV.T  # shape: (D, N)
-        M = np.eye(N) + HV @ HV_T  # shape: (N, N)
-        M_inv = np.linalg.inv(M)
-        losses.append(-np.log(np.linalg.det(M) + 1e-8))  # log-det loss
-
-        for k in range(N):
-            L = 2 + 4 * (H_norm_fro + alpha_k[k])**2 + (2 / np.sqrt(alpha_k[k])) * (H_norm_fro + alpha_k[k])
-            eta_k[k] = 1.0 / L
-            # print(f"Iteration {_+1}, k={k}, alpha_{k}={alpha_k[k]}, eta_{k}={eta_k[k]}")
-            g_k = -2 * HV_T @ M_inv[:, k]  # now g_k is (D,)
-            v_k_prev = V[k]
-            proj_grad = g_k - (1 / alpha_k[k]) * np.dot(v_k_prev, g_k) * v_k_prev
-            d_k = eta_k[k] * proj_grad
-            d_k_norm = np.linalg.norm(d_k)
-
-            if d_k_norm != 0:
-                V[k] = (
-                    np.cos(d_k_norm / np.sqrt(alpha_k[k])) * v_k_prev -
-                    np.sin(d_k_norm / np.sqrt(alpha_k[k])) * d_k / d_k_norm * np.sqrt(alpha_k[k])
-                )
-    return V, losses
-
-def riemannian_block_update(h_last, T=20, alpha_k=1.0, eta_k=1.0, calpha_k=1):
-    N, D = h_last.shape
-    V = []
-    
-    if isinstance(alpha_k, (int, float)):
-        alpha_k = [alpha_k] * N 
-    if isinstance(eta_k, (int, float)):
-        eta_k = [eta_k] * N
-    
-    alpha_k = [calpha_k * (np.linalg.norm(h_last[k]) / D) for k in range(len(h_last))]
-    # print("alpha_k:", alpha_k)
-    print("c_alpha_k:", calpha_k, "alpha_k:", alpha_k)
-    H_norm_fro = np.linalg.norm(h_last, ord='fro')
-    H_bar = np.mean(h_last, axis=0)  # (D,)
-    for k in range(N):
-        h_k = h_last[k]
-        epsilon = np.random.uniform(0, 1, size=D)  # (D,)
-        vk0 = h_k - H_bar + epsilon  # perturbation
-        vk0 = vk0 / np.linalg.norm(vk0) * np.sqrt(alpha_k[k])  # normalize and scale
-        V.append(vk0)
-    V = np.stack(V)
-
-    losses = []
-    for _ in range(T):
-        for k in range(N):
-            HV = h_last + V  # shape: (N, D)
-            HV_T = HV.T  # shape: (D, N)
-            M = np.eye(N) + HV @ HV_T  # shape: (N, N)
-            M_inv = np.linalg.inv(M)
-            losses.append(-np.log(np.linalg.det(M) + 1e-8))  # log-det loss
-            L = 2 + 4 * (H_norm_fro + alpha_k[k])**2 + (2 / np.sqrt(alpha_k[k])) * (H_norm_fro + alpha_k[k])
-            eta_k[k] = 1.0 / L
-            # print(f"Iteration {_+1}, k={k}, alpha_{k}={alpha_k[k]}, eta_{k}={eta_k[k]}")
-            g_k = -2 * HV_T @ M_inv[:, k]  # now g_k is (D,)
-            v_k_prev = V[k]
-            proj_grad = g_k - (1 / alpha_k[k]) * np.dot(v_k_prev, g_k) * v_k_prev
-            d_k = eta_k[k] * proj_grad
-            d_k_norm = np.linalg.norm(d_k)
-
-            if d_k_norm != 0:
-                V[k] = (
-                    np.cos(d_k_norm / np.sqrt(alpha_k[k])) * v_k_prev -
-                    np.sin(d_k_norm / np.sqrt(alpha_k[k])) * d_k / d_k_norm * np.sqrt(alpha_k[k])
-                )
-    return V, losses
-
-def apply_steering_hook(model, tokenizer, steer_at_layer, split_id: int = 198, recalc_steer_after_n_tokens: int = 500, calpha_k: float = 0.0001):
-    input_ids = None
-    token_cnt = 0
-    v_steering = None 
-    
-    def get_input_ids_hook(module, input, output):
-        nonlocal input_ids
-        # input_ids.shape = [batch size, token length so far]
-        input_ids = torch.cat((input_ids, input[0].detach().clone()), dim=1) if input_ids is not None else input[0].detach().clone()
-        # print("Appended tokens:", input_ids[0].tolist())
-
-    def steering_hook(module, input, output):
-        nonlocal token_cnt, v_steering, input_ids, tokenizer
-        token_cnt += 1
-        if input_ids is None or token_cnt < 0: # token_cnt = -1 to skip the first generated token
-            return output 
-
-        if isinstance(output, tuple):
-            output_tensor = output[0]
-            other_outputs = output[1:]
-        else:
-            output_tensor = output
-            other_outputs = ()
-            
-        if (token_cnt - 100) % recalc_steer_after_n_tokens == 0 or token_cnt == 100:
-            print(f"Recompute steering applied at {token_cnt}%{recalc_steer_after_n_tokens} tokens")
-            h_last_np = output_tensor[:, -1, :].detach().cpu().numpy().astype(np.float32)
-            v_steering, _ = riemannian_block_update(h_last_np, T=20, alpha_k=1.0, eta_k=1.0, calpha_k=calpha_k)
-            v_steering = torch.tensor(v_steering, dtype=output_tensor.dtype, device=output_tensor.device)
-            token_cnt = 0 
-            
-        if v_steering is not None:
-            output_tensor[:, -1, :] += v_steering
-        if isinstance(output, tuple):
-            return (output_tensor, *other_outputs)
-        else:
-            return output_tensor
-    print("Steer at layer: ", steer_at_layer)
-    embed_handle = model.model.model.embed_tokens.register_forward_hook(get_input_ids_hook)
-    steering_handle = model.model.model.layers[steer_at_layer].register_forward_hook(steering_hook)
-    return embed_handle, steering_handle
-
 def seed_everything(seed):
     torch.manual_seed(seed)
     random.seed(seed)
@@ -327,7 +161,7 @@ def seed_everything(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def run_steeringalgorithm1_inference_after(args):
+def run(args):
     """Run steering algorithm1 inference with the specified parameters."""
     # Load data from specified path
     project_root = str(Path(__file__).parent.parent.parent)
@@ -342,7 +176,7 @@ def run_steeringalgorithm1_inference_after(args):
     elif 'math' in args.data_path:
         dataset_name = 'math' 
     elif 'olympiadbench' in args.data_path:
-        dataset_name = 'olympiadbench' 
+        dataset_name = 'olympiadbench'
 
     logger.info(f"Dataset type: {dataset_name}")
     data = list(load_jsonl(data_path))[args.input_start:args.input_end]
@@ -357,6 +191,7 @@ def run_steeringalgorithm1_inference_after(args):
 
     logger.info(f"Initializing InferenceEngine with {model_repo}...")
     engine = InferenceEngine(model_repo, use_auto_model=True)
+    
     # Format prompts
     if engine.model_repo in "Qwen/Qwen2.5-Math-1.5B-Instruct":
         prompts = [MATH_PROMPT_TEMPLATE.format(input=question['problem']) for question in data]
@@ -366,7 +201,7 @@ def run_steeringalgorithm1_inference_after(args):
 
 
     # Create run name and cache path
-    run_name = args.run_name_after or f"algorithm1_steering_n{args.number_candidate}_temp{args.temperature}_{args.input_start}_{args.input_end}"
+    run_name = args.run_name_before or f"algorithm1_steering_n{args.number_candidate}_temp{args.temperature}_{args.input_start}_{args.input_end}"
     cache_path = f"{args.cache_dir}/{dataset_name}_{run_name}.pkl"
 
     # Create cache manager
@@ -407,38 +242,22 @@ def run_steeringalgorithm1_inference_after(args):
     # print("Engine config: ", engine.config)
     engine.config['num_hidden_layers'] = engine.model.config.num_hidden_layers
     # print("Engine config: ", engine.config)
-    
-    for i, prompt in enumerate(tqdm(prompts)):
-    # try:         
+    # Process each problem separately
+    for i, prompt in enumerate(tqdm(prompts)):   
         prompt_inputs = engine.tokenizer(prompt, return_tensors="pt").to("cuda")
-
-        # Apply hook
-        handle = apply_steering_hook(engine, engine.tokenizer, steer_at_layer=args.steer_at_layer, recalc_steer_after_n_tokens=args.recalc_steer_after_n_tokens, calpha_k=args.calpha_k)
-        # print("Hook applied to model for steering...")
+        
         # Generate output with steering
         output = engine.generate(
             prompt_inputs,
             config={"max_new_tokens": 2048, "temperature": args.temperature, "do_sample": True, "num_return_sequences": args.number_candidate},
             return_raw_output=False
         )
-
-        # Clean up hook
-        handle[0].remove()
-        handle[1].remove()
     
         # Store result
         steered_outputs = output[0]["text"]  # output["text"] is a list of strings
         generations.append(steered_outputs)
         for x in steered_outputs: 
             print(repr(x[-50:]))
-        # except Exception as e:
-        #     logger.error(f"Error processing problem {i}: {e}")
-        #     # Provide fallback values on error
-        #     best_idx = 0
-        #     best_response = f"Error: {str(e)[:100]}..."
-        #     best_logprob = float('-inf')
-        #     responses = [best_response]
-        #     sequence_logprobs = [best_logprob]
 
         # Track token counts from the generation
         input_tokens = 0
@@ -541,4 +360,4 @@ def run_steeringalgorithm1_inference_after(args):
 if __name__ == "__main__":
     seed_everything(42)
     args = parse_args()
-    results = run_steeringalgorithm1_inference_after(args)
+    results = run(args)

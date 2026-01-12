@@ -6,7 +6,6 @@ This script implements the steering algorithm 1 approach:
 2. Get activation of layer k and calculate the average
 3. Re-generate N candidate answers with new activation
 """
-
 import os
 import sys
 import argparse
@@ -17,11 +16,8 @@ import numpy as np
 import logging
 import re
 import random
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 from pathlib import Path
-from collections import Counter, defaultdict
-from typing import Union, List, Dict
 import transformers 
 import torch.nn.functional as F
 from torch import nn
@@ -77,7 +73,7 @@ def parse_args():
     parser.add_argument(
         "--calpha_k",
         type=float,
-        default=0.0001,
+        default=0.1,
     )
     parser.add_argument(
         "--model_repo",
@@ -119,6 +115,12 @@ def parse_args():
         type=int,
         default=5,
         help="Number of candidates to generate per problem (default: 5)"
+    )
+    parser.add_argument(
+        "--steer_at_layer",
+        type=int,
+        default=5,
+        help="Position of layer for steering"
     )
     parser.add_argument(
         "--save_all_candidates",
@@ -182,73 +184,9 @@ def extract_candidate_answer(response, dataset="math"):
     except Exception as e:
         logger.warning(f"Error extracting answer: {e}")
         # Last resort fallback
-        return response.strip()
-    
-def get_activations_sample_once(model, prompt: str, device, traced_layers: List[int] = None):
-    if traced_layers is None:
-        traced_layers = list(range(model.config['num_hidden_layers']))
+        return response.strip()        
 
-    model.model.eval()
-
-    # Hook lưu activation
-    activations = {
-        "mlp": {},
-        "attn": {},
-    }
-
-    def make_hook(layer_type, i):
-        def hook_fn(module, input, output):
-            activations[layer_type][i] = output.detach().cpu()
-        return hook_fn
-
-    handles = []
-    for i in traced_layers:
-        mlp_layer = model.model.model.layers[i].mlp
-        attn_proj_layer = model.model.model.layers[i].self_attn.o_proj
-        handles.append(mlp_layer.register_forward_hook(make_hook('mlp', i)))
-        handles.append(attn_proj_layer.register_forward_hook(make_hook('attn', i)))
-
-    # Tokenize prompt
-    inputs = model.tokenizer(prompt, return_tensors='pt').to(device)
-
-    # Sampling
-    with torch.no_grad():
-        _ = model.model.generate(
-            **inputs,
-            do_sample=True,
-            temperature=1.0,
-            top_k=50,
-            max_new_tokens=50,
-            output_scores=True,
-            return_dict_in_generate=True
-        )
-
-    # Clean up hooks
-    for h in handles:
-        h.remove()
-
-    # Convert to numpy arrays
-    attn_outputs = np.stack([activations["attn"][i].squeeze().float().numpy() for i in traced_layers], axis=0)
-    mlp_outputs = np.stack([activations["mlp"][i].squeeze().float().numpy() for i in traced_layers], axis=0)
-
-    return attn_outputs, mlp_outputs
-        
-def get_activations_multiple_samples(model, prompt: str, device, num_samples: int = 8):
-    print("Sampling with prompt:", prompt)
-    all_attn_outputs = []
-    all_mlp_outputs = []
-
-    for i in range(num_samples):
-        # print(f"Sampling {i+1}/{num_samples}")
-        attn_out, mlp_out = get_activations_sample_once(model, prompt, device)
-        all_attn_outputs.append(attn_out)
-        all_mlp_outputs.append(mlp_out)
-
-    return all_attn_outputs, all_mlp_outputs
-
-    # pass alpha_k and eta_k as lists.
-
-def riemannian_block_update(h_last, T=10, alpha_k=1.0, eta_k=1.0, calpha_k=0.001):
+def riemannian_block_update(h_last, T=50, alpha_k=1.0, eta_k=1.0, calpha_k=1):
     N, D = h_last.shape
     V = []
     
@@ -257,26 +195,27 @@ def riemannian_block_update(h_last, T=10, alpha_k=1.0, eta_k=1.0, calpha_k=0.001
     if isinstance(eta_k, (int, float)):
         eta_k = [eta_k] * N
     
-    alpha_k = [calpha_k * np.linalg.norm(h_last[k])**2 for k in range(len(h_last))]
+    alpha_k = [calpha_k * (np.linalg.norm(h_last[k]) / D) for k in range(len(h_last))]
     # print("alpha_k:", alpha_k)
+    print("c_alpha_k:", calpha_k, "alpha_k:", alpha_k)
     H_norm_fro = np.linalg.norm(h_last, ord='fro')
-    
+    H_bar = np.mean(h_last, axis=0)  # (D,)
     for k in range(N):
         h_k = h_last[k]
-        norm_h_k = np.linalg.norm(h_k)
-        v_k0 = np.zeros_like(h_k) if norm_h_k == 0 else h_k / norm_h_k * np.sqrt(alpha_k[k])
-        V.append(v_k0)
+        epsilon = np.random.uniform(0, 1, size=D)  # (D,)
+        vk0 = h_k - H_bar + epsilon  # perturbation
+        vk0 = vk0 / np.linalg.norm(vk0) * np.sqrt(alpha_k[k])  # normalize and scale
+        V.append(vk0)
     V = np.stack(V)
 
     losses = []
     for _ in range(T):
-        HV = h_last + V  # shape: (N, D)
-        HV_T = HV.T  # shape: (D, N)
-        M = np.eye(N) + HV @ HV_T  # shape: (N, N)
-        M_inv = np.linalg.inv(M)
-        losses.append(-np.log(np.linalg.det(M) + 1e-8))  # log-det loss
-
         for k in range(N):
+            HV = h_last + V  # shape: (N, D)
+            HV_T = HV.T  # shape: (D, N)
+            M = np.eye(N) + HV @ HV_T  # shape: (N, N)
+            M_inv = np.linalg.inv(M)
+            losses.append(-np.log(np.linalg.det(M) + 1e-8))  # log-det loss
             L = 2 + 4 * (H_norm_fro + alpha_k[k])**2 + (2 / np.sqrt(alpha_k[k])) * (H_norm_fro + alpha_k[k])
             eta_k[k] = 1.0 / L
             # print(f"Iteration {_+1}, k={k}, alpha_{k}={alpha_k[k]}, eta_{k}={eta_k[k]}")
@@ -293,9 +232,9 @@ def riemannian_block_update(h_last, T=10, alpha_k=1.0, eta_k=1.0, calpha_k=0.001
                 )
     return V, losses
 
-def apply_steering_hook(model, tokenizer, split_id: int = 198, recalc_steer_after_n_tokens: int = 200, calpha_k: float = 0.0001):
+def apply_steering_hook(model, tokenizer, steer_at_layer, split_id: int = 198, recalc_steer_after_n_tokens: int = 500, calpha_k: float = 0.0001):
     input_ids = None
-    token_cnt = -2
+    token_cnt = 0
     v_steering = None 
     
     def get_input_ids_hook(module, input, output):
@@ -306,7 +245,6 @@ def apply_steering_hook(model, tokenizer, split_id: int = 198, recalc_steer_afte
 
     def steering_hook(module, input, output):
         nonlocal token_cnt, v_steering, input_ids, tokenizer
-        # input_ids = current_input_ids.get('ids')
         token_cnt += 1
         if input_ids is None or token_cnt < 0: # token_cnt = -1 to skip the first generated token
             return output 
@@ -318,26 +256,22 @@ def apply_steering_hook(model, tokenizer, split_id: int = 198, recalc_steer_afte
             output_tensor = output
             other_outputs = ()
             
-        if token_cnt % recalc_steer_after_n_tokens == 0:
-            # print(f"Recompute steering applied at {token_cnt}%{recalc_steer_after_n_tokens} tokens")
+        if (token_cnt - 100) % recalc_steer_after_n_tokens == 0 or token_cnt == 100:
+            print(f"Recompute steering applied at {token_cnt}%{recalc_steer_after_n_tokens} tokens")
             h_last_np = output_tensor[:, -1, :].detach().cpu().numpy().astype(np.float32)
-            v_steering, _ = riemannian_block_update(h_last_np, T=10, alpha_k=1.0, eta_k=1.0, calpha_k=calpha_k)
-            # print("v_steering shape: ", v_steering.shape)
-            # print("output_tensor shape: ", output_tensor.shape)
+            v_steering, _ = riemannian_block_update(h_last_np, T=20, alpha_k=1.0, eta_k=1.0, calpha_k=calpha_k)
             v_steering = torch.tensor(v_steering, dtype=output_tensor.dtype, device=output_tensor.device)
             token_cnt = 0 
             
-        # output_tensor = output_tensor.clone()  # avoid in-place mutation (optional but safer)
         if v_steering is not None:
             output_tensor[:, -1, :] += v_steering
-        # Return in the same format as input
         if isinstance(output, tuple):
             return (output_tensor, *other_outputs)
         else:
             return output_tensor
-
+    print("Steer at layer: ", steer_at_layer)
     embed_handle = model.model.model.embed_tokens.register_forward_hook(get_input_ids_hook)
-    steering_handle = model.model.model.layers[-1].register_forward_hook(steering_hook)
+    steering_handle = model.model.model.layers[steer_at_layer].register_forward_hook(steering_hook)
     return embed_handle, steering_handle
 
 def seed_everything(seed):
@@ -348,202 +282,7 @@ def seed_everything(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def run_steeringalgorithm1_inference_before(args):
-    """Run steering algorithm1 inference with the specified parameters."""
-    # Load data from specified path
-    project_root = str(Path(__file__).parent.parent.parent)
-    data_path = os.path.join(project_root, args.data_path)
-    logger.info(f"Loading data from: {data_path}")
-
-    # Identify dataset type
-    if 'gsm8k' in args.data_path:
-        dataset_name = 'gsm8k'
-    elif 'aime24' in args.data_path:
-        dataset_name = 'aime24'
-    elif 'math' in args.data_path:
-        dataset_name = 'math' 
-    elif 'olympiadbench' in args.data_path:
-        dataset_name = 'olympiadbench'
-
-    logger.info(f"Dataset type: {dataset_name}")
-    data = list(load_jsonl(data_path))[args.input_start:args.input_end]
-
-    # Create directories
-    os.makedirs(args.cache_dir, exist_ok=True)
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    # Initialize model
-    model_repo = args.model_repo
-    model_name = model_repo.split('/')[-1].lower()
-
-    logger.info(f"Initializing InferenceEngine with {model_repo}...")
-    engine = InferenceEngine(model_repo, use_auto_model=True)
-    # Format prompts
-    if engine.model_repo in "Qwen/Qwen2.5-Math-1.5B-Instruct":
-        prompts = [MATH_PROMPT_TEMPLATE.format(input=question['problem']) for question in data]
-    elif engine.model_repo in "Qwen/Qwen2.5-1.5B":
-        prompts = [BASE_PROMPT_TEMPLATE.format(input=question['problem']) for question in data]
-    # print("First prompt: ", prompts[0])
-
-
-    # Create run name and cache path
-    run_name = args.run_name_before or f"algorithm1_steering_n{args.number_candidate}_temp{args.temperature}_{args.input_start}_{args.input_end}"
-    cache_path = f"{args.cache_dir}/{dataset_name}_{run_name}.pkl"
-
-    # Create cache manager
-    cache_manager = CacheManager(inference_engine=engine, cache_file_path=cache_path, batch_size=args.batch_size)
-
-    # Configure engine for temperature sampling with multiple candidates
-    engine.config["temperature"] = args.temperature
-    engine.config["do_sample"] = args.temperature > 0
-    engine.config["num_return_sequences"] = 1
-
-    engine.config["return_dict_in_generate"] = True
-    engine.config["output_scores"] = True
-
-    logger.info(f"Running N-{args.number_candidate} inference on {len(prompts)} problems with temperature {args.temperature}...")
-    
-
-    results = {
-        "metadata": {
-            "model": model_repo,
-            "temperature": args.temperature,
-            "input_start": args.input_start,
-            "input_end": args.input_end,
-            "generation_config": engine.config,
-            "total_wallclock_time": 0,  # Will be updated at the end
-            "num_problems": len(data),  # Store number of problems for per-prompt time calculation
-            "total_tokens_generated": 0,  # Will track total tokens generated
-            "total_prompt_tokens": 0,    # Will track total prompt tokens
-            "total_candidates": 0,       # Will track total number of candidates
-            "total_output_tokens": 0     # Will track total output tokens (for compatible with other metrics)
-        },
-        "results": []
-    }
-
-    # For tracking total wallclock time
-    start_wallclock_time = time.time()
-    generations = []
-
-    # print("Engine config: ", engine.config)
-    engine.config['num_hidden_layers'] = engine.model.config.num_hidden_layers
-    # print("Engine config: ", engine.config)
-    # Process each problem separately
-    for i, prompt in enumerate(tqdm(prompts)):   
-        prompt_inputs = engine.tokenizer(prompt, return_tensors="pt").to("cuda")
-        
-        # Generate output with steering
-        output = engine.generate(
-            prompt_inputs,
-            config={"max_new_tokens": 2048, "temperature": args.temperature, "do_sample": True, "num_return_sequences": args.number_candidate},
-            return_raw_output=False
-        )
-    
-        # Store result
-        steered_outputs = output[0]["text"]  # output["text"] is a list of strings
-        generations.append(steered_outputs)
-        for x in steered_outputs: 
-            print(repr(x[-50:]))
-
-        # Track token counts from the generation
-        input_tokens = 0
-        output_tokens = 0
-
-        # Track the number of candidates we generated for this problem
-        candidate_count = len(steered_outputs)
-        results["metadata"]["total_candidates"] += candidate_count
-
-        # Get token counts if available in the generation output
-        if isinstance(generations, dict):
-            if "input_token_count" in generations:
-                input_tokens = generations["input_token_count"]
-                results["metadata"]["total_prompt_tokens"] += input_tokens
-
-            if "output_token_count" in generations:
-                output_tokens = generations["output_token_count"]
-                results["metadata"]["total_tokens_generated"] += output_tokens
-                results["metadata"]["total_output_tokens"] += output_tokens
-
-            # Alternative counting method if specific counts aren't available
-            elif "token_count" in generations:
-                # For best-of-N, we typically generate N times more tokens
-                gen_tokens = generations["token_count"]
-                # Estimate input vs output tokens
-                if args.number_candidate > 1:
-                    # With multiple sequences, we're reusing the prompt
-                    output_tokens = gen_tokens - input_tokens
-                    results["metadata"]["total_tokens_generated"] += output_tokens
-                    results["metadata"]["total_output_tokens"] += output_tokens
-
-        # Create result entry
-        result = {
-            'problem': data[i]['problem'],
-            'ground_truth': data[i]['answer'][0] if isinstance(data[i]['answer'], list) else data[i]['answer'],
-            'input_tokens': input_tokens,
-            'output_tokens': output_tokens            
-        }
-
-        # Optional save all candidate
-        if args.save_all_candidates:
-            result['responses'] = steered_outputs
-            
-        results["results"].append(result)
-
-    # Calculate total wallclock time
-    end_wallclock_time = time.time()
-    total_wallclock_time = end_wallclock_time - start_wallclock_time
-
-    # Update metadata with timing information
-    results["metadata"]["total_wallclock_time"] = total_wallclock_time
-    
-    # Calculate average output tokens per candidate (for fairer comparison)
-    if results["metadata"].get("total_candidates", 0) > 0:
-        results["metadata"]["avg_output_tokens_per_candidate"] = results["metadata"]["total_output_tokens"] / results["metadata"]["total_candidates"]
-    else:
-        results["metadata"]["avg_output_tokens_per_candidate"] = 0
-    
-    # Traditional average output tokens per problem (kept for backward compatibility)
-    if len(data) > 0:
-        results["metadata"]["avg_output_tokens"] = results["metadata"]["total_output_tokens"] / len(data)
-
-    # Save raw results
-    results_file = f"{args.output_dir}/{run_name}_raw.pkl"
-    with open(results_file, 'wb') as f:
-        pickle.dump(results, f)
-    logger.info(f"Raw results saved to {results_file}")
-
-    # Create a log file
-    log_file = f"{args.output_dir}/logs.txt"
-    with open(log_file, 'a') as f:
-        f.write(f"Run: {run_name}\n")
-        f.write(f"Model: {model_repo}\n")
-        f.write(f"Number of candidate: {args.number_candidate}\n")
-        f.write(f"Temperature: {args.temperature}\n")
-        f.write(f"Input range: {args.input_start}-{args.input_end}\n")
-        f.write(f"Problems: {len(data)}\n")
-        f.write(f"Total wallclock time: {total_wallclock_time:.2f} seconds\n")
-        f.write(f"Average time per problem: {total_wallclock_time/len(data):.2f} seconds\n")
-        f.write(f"Total prompt tokens: {results['metadata']['total_prompt_tokens']}\n")
-        f.write(f"Total generated tokens: {results['metadata']['total_tokens_generated']}\n")
-        f.write(f"Total candidates: {results['metadata']['total_candidates']}\n")
-        f.write(f"Average tokens per problem: {results['metadata']['total_output_tokens']/len(data):.2f}\n")
-        f.write(f"Average tokens per candidate: {results['metadata']['avg_output_tokens_per_candidate']:.2f}\n")
-        f.write(f"Raw results saved to: {results_file}\n")
-        f.write(f"To evaluate: python evaluate_strategies.py --input {results_file} --plot\n\n")
-
-    logger.info(f"Run information saved to log file: {log_file}")
-    logger.info(f"Total wallclock time: {total_wallclock_time:.2f} seconds")
-    logger.info(f"Average time per problem: {total_wallclock_time/len(data):.2f} seconds")
-    logger.info(f"Total prompt tokens: {results['metadata']['total_prompt_tokens']}")
-    logger.info(f"Total generated tokens: {results['metadata']['total_tokens_generated']}")
-    logger.info(f"Total candidates: {results['metadata']['total_candidates']}")
-    logger.info(f"Average tokens per problem: {results['metadata']['total_output_tokens']/len(data):.2f}")
-    logger.info(f"Average tokens per candidate: {results['metadata']['avg_output_tokens_per_candidate']:.2f}")
-    logger.info(f"To evaluate results, run: python evaluate_strategies.py --input {results_file} --plot")
-    
-    return results
-
-def run_steeringalgorithm1_inference_after(args):
+def run_steering(args):
     """Run steering algorithm1 inference with the specified parameters."""
     # Load data from specified path
     project_root = str(Path(__file__).parent.parent.parent)
@@ -623,25 +362,13 @@ def run_steeringalgorithm1_inference_after(args):
     # print("Engine config: ", engine.config)
     engine.config['num_hidden_layers'] = engine.model.config.num_hidden_layers
     # print("Engine config: ", engine.config)
-    # Process each problem separately
-    batch_size = 4  # Điều chỉnh theo dung lượng GPU
-    loader = DataLoader(prompts, batch_size=batch_size)
-
-    for batch_prompts in tqdm(loader):
-        # Tokenize batch
-        prompt_inputs = engine.tokenizer(
-            list(batch_prompts),  # đảm bảo là list[str]
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-        ).to("cuda")
     
-    # for i, prompt in enumerate(tqdm(prompts)):
-        # try:         
-        # prompt_inputs = engine.tokenizer(prompt, return_tensors="pt").to("cuda")
+    for i, prompt in enumerate(tqdm(prompts)):
+    # try:         
+        prompt_inputs = engine.tokenizer(prompt, return_tensors="pt").to("cuda")
 
         # Apply hook
-        handle = apply_steering_hook(engine, engine.tokenizer, recalc_steer_after_n_tokens=args.recalc_steer_after_n_tokens, calpha_k=args.calpha_k)
+        handle = apply_steering_hook(engine, engine.tokenizer, steer_at_layer=args.steer_at_layer, recalc_steer_after_n_tokens=args.recalc_steer_after_n_tokens, calpha_k=args.calpha_k)
         # print("Hook applied to model for steering...")
         # Generate output with steering
         output = engine.generate(
@@ -769,5 +496,4 @@ def run_steeringalgorithm1_inference_after(args):
 if __name__ == "__main__":
     seed_everything(42)
     args = parse_args()
-    results = run_steeringalgorithm1_inference_before(args)
-    # results = run_steeringalgorithm1_inference_after(args)
+    results = run_steering(args)
