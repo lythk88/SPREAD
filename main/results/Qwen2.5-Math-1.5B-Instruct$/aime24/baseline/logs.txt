@@ -1,0 +1,32 @@
+Run: bestof8_aime24_temp0.2
+Model: Qwen/Qwen2.5-Math-1.5B-Instruct
+Number of candidate: 8
+Temperature: 0.2
+Input range: 0-1000
+Problems: 30
+Total wallclock time: 1334.50 seconds
+Average time per problem: 44.48 seconds
+Total prompt tokens: 0
+Total generated tokens: 0
+Total candidates: 240
+Average tokens per problem: 0.00
+Average tokens per candidate: 0.00
+Raw results saved to: main/results/Qwen2.5-Math-1.5B-Instruct$/aime24/baseline/bestof8_aime24_temp0.2_raw.pkl
+To evaluate: python evaluate_strategies.py --input main/results/Qwen2.5-Math-1.5B-Instruct$/aime24/baseline/bestof8_aime24_temp0.2_raw.pkl --plot
+
+Run: bestof8_aime24_temp0.4
+Model: Qwen/Qwen2.5-Math-1.5B-Instruct
+Number of candidate: 8
+Temperature: 0.4
+Input range: 0-1000
+Problems: 30
+Total wallclock time: 1276.63 seconds
+Average time per problem: 42.55 seconds
+Total prompt tokens: 0
+Total generated tokens: 0
+Total candidates: 240
+Average tokens per problem: 0.00
+Average tokens per candidate: 0.00
+Raw results saved to: main/results/Qwen2.5-Math-1.5B-Instruct$/aime24/baseline/bestof8_aime24_temp0.4_raw.pkl
+To evaluate: python evaluate_strategies.py --input main/results/Qwen2.5-Math-1.5B-Instruct$/aime24/baseline/bestof8_aime24_temp0.4_raw.pkl --plot
+
