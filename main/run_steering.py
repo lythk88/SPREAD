@@ -197,7 +197,7 @@ def riemannian_block_update(h_last, T=50, alpha_k=1.0, eta_k=1.0, calpha_k=1):
     
     alpha_k = [calpha_k * (np.linalg.norm(h_last[k]) / D) for k in range(len(h_last))]
     # print("alpha_k:", alpha_k)
-    print("c_alpha_k:", calpha_k, "alpha_k:", alpha_k)
+    # print("c_alpha_k:", calpha_k, "alpha_k:", alpha_k)
     H_norm_fro = np.linalg.norm(h_last, ord='fro')
     H_bar = np.mean(h_last, axis=0)  # (D,)
     for k in range(N):
@@ -257,7 +257,7 @@ def apply_steering_hook(model, tokenizer, steer_at_layer, split_id: int = 198, r
             other_outputs = ()
             
         if (token_cnt - 100) % recalc_steer_after_n_tokens == 0 or token_cnt == 100:
-            print(f"Recompute steering applied at {token_cnt}%{recalc_steer_after_n_tokens} tokens")
+            # print(f"Recompute steering applied at {token_cnt}%{recalc_steer_after_n_tokens} tokens")
             h_last_np = output_tensor[:, -1, :].detach().cpu().numpy().astype(np.float32)
             v_steering, _ = riemannian_block_update(h_last_np, T=20, alpha_k=1.0, eta_k=1.0, calpha_k=calpha_k)
             v_steering = torch.tensor(v_steering, dtype=output_tensor.dtype, device=output_tensor.device)

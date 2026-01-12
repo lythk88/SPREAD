@@ -385,6 +385,8 @@ def find_strategy_files(input_dir: str) -> Dict[str, List[str]]:
         "steer-base-ver2": ["*steer-base-ver2*raw.pkl", "*steerbase-ver2*raw.pkl"],
         "steer-algor1-ver3": ["*steer-algor1-ver3*raw.pkl", "*steeraglor1-ver3*raw.pkl"],
         "steer-base-ver3": ["*steer-base-ver3*raw.pkl", "*steerbase-ver3*raw.pkl"],
+        "steer": ["*steer*raw.pkl", "*steer*raw.pkl"],
+        "baseline": ["*bestof*raw.pkl", "*bestof*raw.pkl"],
     }
 
     results = {}

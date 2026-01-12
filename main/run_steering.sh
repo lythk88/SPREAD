@@ -3,23 +3,22 @@ MODEL_REPO="Qwen/Qwen2.5-Math-1.5B-Instruct"
 MODEL_NAME="Qwen2.5-Math-1.5B-Instruct"
 # MODEL_REPO="Qwen/Qwen2.5-1.5B"
 # MODEL_NAME="Qwen2.5-1.5B"
-OUTPUT_DIR=results/$(basename "$MODEL_REPO")$
+OUTPUT_DIR=main/results/$(basename "$MODEL_REPO")$
 START=0
 END=1000
 STEERN=500
+LAYER=27
 
 # Create output directories
 mkdir -p $OUTPUT_DIR
 mkdir -p $OUTPUT_DIR/math
-mkdir -p $OUTPUT_DIR/gsm8k/
 mkdir -p $OUTPUT_DIR/aime24
 mkdir -p $OUTPUT_DIR/olympiadbench
 
 # Run once with a large N for AIME24
-TEMPERATURE=0.6
 N=8
-for LAYER in 21; do
-  for CALPHA_K in 1; do
+for TEMPERATURE in 0.2 0.4 0.6 0.8 1.0; do
+  for CALPHA_K in 1 10; do
   echo "Running Steering algorithm1 on AIME24 dataset..."
   python main/run_steering.py \
     --model_repo "$MODEL_REPO" \
@@ -35,13 +34,13 @@ for LAYER in 21; do
     --output_dir $OUTPUT_DIR/aime24/steering \
     --run_name_after "steer${N}_aime24_steern${STEERN}-calpha-k${CALPHA_K}-temp${TEMPERATURE}-layer${LAYER}"
   done
+  python main/evaluate_strategies.py   --input main/results/$MODEL_NAME$/aime24/steering  --plot --dataset "aime24"   --output_dir main/results/$MODEL_NAME$/aime24/steering
 done
-python main/evaluate_strategies.py   --input main/results/$MODEL_NAME$/aime24/steering  --plot --dataset "aime24"   --output_dir main/results/$MODEL_NAME$/aime24/steering
 
 # Run once with a large N for MATH500
 N=4
-for TEMPERATURE in 0.6; do
-  for CALPHA_K in 1; do
+for TEMPERATURE in 0.2 0.4 0.6 0.8 1.0; do
+  for CALPHA_K in 1 10; do
   echo "Running Steering algorithm1 on MATH500 dataset..."
   python main/run_steering.py \
     --model_repo "$MODEL_REPO" \
@@ -61,8 +60,8 @@ done
 
 # Run once with a large N for OLYMPIADBENCH
 N=8
-for TEMPERATURE in 0.4; do
-  for CALPHA_K in 10; do
+for TEMPERATURE in 0.2 0.4 0.6 0.8 1.0; do
+  for CALPHA_K in 1 10; do
   echo "Running Steering algorithm1 on OlympiadBench dataset..."
   python main/run_steering.py \
     --model_repo "$MODEL_REPO" \

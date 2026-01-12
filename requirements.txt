@@ -5,3 +5,4 @@ pandas
 scikit-learn
 numpy
 peft
+latex2sympy2
